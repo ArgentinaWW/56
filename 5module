@@ -1,0 +1,83 @@
+--- Модуль 5. Создание процедуры и триггеров. (адаптировано под базу CompanyDB / "Заказчики4")
+
+USE CompanyDB;   -- ДОБАВЛЕНО: указываем рабочую базу данных
+GO               -- ДОБАВЛЕНО: GO, чтобы CREATE PROCEDURE был первым в батче
+
+--- Создание процедуры.
+
+-- Процедура для получения сводной информации
+CREATE PROCEDURE GetOrderSummary
+    @StartDate DATE,
+    @EndDate DATE
+AS
+BEGIN
+    -- Проверка дат
+    IF @StartDate > @EndDate
+    BEGIN
+        RAISERROR('Ошибка: Дата начала периода не может быть позже даты окончания!', 16, 1);
+        RETURN;
+    END
+
+    SELECT 
+        COUNT(DISTINCT o.OrderID) AS TotalOrders,    -- было: o.NumOrder
+        SUM(od.Quantity) AS TotalProducts,
+        SUM(o.TotalAmount) AS TotalAmount,           -- было: o.SumOrder (прямой аналог поля суммы заказа; для точной суммы по позициям можно SUM(od.Amount))
+        c.CustomerName                               -- было: c.Name
+    FROM Orders o
+    JOIN OrderDetails od ON o.OrderID = od.OrderID   -- было: OrderDetail / o.NumOrder = od.NumOrder
+    JOIN Customers c ON o.CustomerID = c.CustomerID  -- было: Customer / o.Customer = c.ID
+    WHERE
+        o.OrderDate >= @StartDate 
+        AND o.OrderDate <= @EndDate
+        AND c.IsBuyer = 1                            -- было: c.Buyer
+    GROUP BY c.CustomerName                           -- было: c.Name
+END;
+GO   -- ДОБАВЛЕНО: GO после процедуры
+
+-- УБРАНО: ALTER TABLE Orders ADD TotalAmount DECIMAL(10,2) NULL;
+-- В CompanyDB столбец TotalAmount в таблице Orders уже есть — повторное добавление выдаст ошибку.
+
+--- Протестируем процедуру.
+-- даты подобраны под данные CompanyDB (заказы там за июнь 2026); было: '2025-06-06'
+EXEC GetOrderSummary @StartDate = '2026-06-01', @EndDate = '2026-06-30';
+GO
+
+--- Создание триггера.
+
+-- Создание триггера для расчета общей суммы заказа
+CREATE TRIGGER trg_CalculateOrderTotal
+ON OrderDetails                                      -- было: OrderDetail
+AFTER INSERT, UPDATE
+AS
+BEGIN
+    UPDATE o
+    SET TotalAmount = (
+        SELECT SUM(od.UnitPrice * od.Quantity)      -- было: od.Cost * od.Quantity
+        FROM OrderDetails od                         -- было: OrderDetail
+        WHERE od.OrderID = o.OrderID                -- было: od.NumOrder = o.NumOrder
+    )
+    FROM Orders o
+    INNER JOIN inserted i ON o.OrderID = i.OrderID  -- было: o.NumOrder = i.NumOrder
+END;
+GO   -- ДОБАВЛЕНО: GO, чтобы CREATE TRIGGER был первым в батче
+
+-- Пример добавления заказа
+-- Столбцы заменены под CompanyDB: OrderID — IDENTITY (генерируется автоматически),
+-- поэтому NumOrder/Executor/SumOrder убраны; Customer -> CustomerID.
+INSERT INTO Orders (OrderNumber, OrderDate, CustomerID, TotalAmount)  -- было: (NumOrder, Executor, Customer, OrderDate, SumOrder, TotalAmount)
+VALUES ('1003', '2026-06-06', 3, 0);                                 -- было: (1003, 2, 3, '2025-06-06', 1600, 0)
+
+DECLARE @NewOrderID INT = SCOPE_IDENTITY();  -- ДОБАВЛЕНО: ловим автосгенерированный OrderID
+
+SELECT * FROM Orders;
+
+-- Добавление позиций заказа
+INSERT INTO OrderDetails (OrderID, ProductID, Quantity, UnitPrice)  -- было: OrderDetail (NumOrder, Product, Quantity, Cost)
+VALUES
+(@NewOrderID, 1, 2, 100.00),  -- было: 1001 (теперь ссылаемся на только что вставленный заказ)
+(@NewOrderID, 2, 1, 250.50),
+(@NewOrderID, 3, 3, 75.25);
+
+SELECT * FROM OrderDetails;                        -- было: OrderDetail
+SELECT * FROM Orders WHERE OrderID = @NewOrderID;  -- ДОБАВЛЕНО: видно, что триггер пересчитал TotalAmount
+
